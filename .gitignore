@@ -129,7 +129,7 @@ dmypy.json
 .pyre/
 
 # custom/private files
-config.json
+fdr-config.json
 
 # data folders
 */PackageData
