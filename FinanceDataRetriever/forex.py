@@ -1,8 +1,8 @@
 from FinanceDataRetriever import CONFIG_FILEPATH, MT5_LOGIN_ID, MT5_LOGIN_PASSWORD, MT5_TRADE_SERVER, \
     MT5_TERMINAL_PATH, MT5_TIMEFRAMES, FOREX_DATA_DIR, PACKAGE_TEMP_DIR, MT5_TIME_COL_NAME, MT5_TICK_TIMEFRAME_NAME, \
-    MT5_OPEN_COL_NAME, MT5_REAL_VOLUME_COL_NAME, MT5_TICK_VOLUME_COL_NAME, MT5_CLOSE_COL_NAME, MT5_LOW_COL_NAME, \
-    MT5_HIGH_COL_NAME, MT5_SPREAD_COL_NAME, MT5_BID_COL_NAME, MT5_ASK_COL_NAME, LEAN_FOREX_DATA_DIR_PATH, \
-    LEAN_FMT_MT5_DATA_DIR
+    MT5_OPEN_COL_NAME, MT5_TICK_VOLUME_COL_NAME, MT5_CLOSE_COL_NAME, MT5_LOW_COL_NAME, MT5_HIGH_COL_NAME, \
+    MT5_SPREAD_COL_NAME, MT5_BID_COL_NAME, MT5_ASK_COL_NAME, LEAN_FOREX_DATA_DIR_PATH, LEAN_FMT_MT5_DATA_DIR, \
+    MT5_TF_TO_DAYS_SKIPPED
 from FinanceDataRetriever import utils
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta, timezone
@@ -95,20 +95,20 @@ def download_mt5_data(symbol, resolution, start_datetime=None, end_datetime=None
         filepath = download_dir / f"mt5_{server}_{symbol}_{resolution}_{bar_count}_bars_from_{bar_start_pos}_bar" \
                                   f"_on_{current_utc_dt.strftime(dt_save_form)}.csv"
 
-    if resolution == MT5_TICK_TIMEFRAME_NAME:
-        time_skip = timedelta(days=30)
-    else:
-        time_skip = timedelta(days=365)
+    days_to_skip = MT5_TF_TO_DAYS_SKIPPED["default"]
+    if resolution in MT5_TF_TO_DAYS_SKIPPED:
+        days_to_skip = MT5_TF_TO_DAYS_SKIPPED[resolution]
+    time_skip = timedelta(days=days_to_skip)
     retries = 0
+    max_retries = 3
     files_to_merge = []
     ticks = None
 
     if start_datetime is not None:
         while cur_start_time < end_datetime:
             cur_end_time = cur_start_time + time_skip
-            cur_end_time = \
-                min((cur_end_time - cur_start_time, cur_end_time), (end_datetime - cur_start_time, end_datetime),
-                    key=lambda tup: tup[0])[1]
+            cur_end_time = min((cur_end_time - cur_start_time, cur_end_time),
+                               (end_datetime - cur_start_time, end_datetime), key=lambda tup: tup[0])[1]
             if resolution == MT5_TICK_TIMEFRAME_NAME:
                 cur_ticks_batch = mt5.copy_ticks_range(symbol, cur_start_time, cur_end_time, mt5.COPY_TICKS_ALL)
             else:
@@ -135,7 +135,7 @@ def download_mt5_data(symbol, resolution, start_datetime=None, end_datetime=None
             else:
                 logger.error(f"failed to retrieve tick data from MT5 terminal for {symbol} {resolution} data for "
                              f"time range of {cur_start_time} to {cur_end_time}, mt5 error:\n{res}")
-                if retries < 3:
+                if retries < max_retries:
                     retries += 1
                     logger.error("retrying...")
                     continue
@@ -221,7 +221,7 @@ def convert_mt5_data_to_lean_fmt(mt5_data_path, symbol, resolution, num_cur_pair
     #                 Ask Close, Last Ask Size]
     # tick format: [Time, Bid Price, Ask Price]
     spread_multiplier = (10 ** -(num_cur_pair_decimals - 1))
-    data_by_date = {}
+    dates = {}
     formatted_data = []
     for i, row in mt5_data_df.iterrows():
         half_ask_bid_diff = row[MT5_SPREAD_COL_NAME] * spread_multiplier / 2
@@ -229,14 +229,11 @@ def convert_mt5_data_to_lean_fmt(mt5_data_path, symbol, resolution, num_cur_pair
         dt = datetime.fromtimestamp(row[MT5_TIME_COL_NAME], tz=timezone.utc)
 
         if resolution == MT5_TICK_TIMEFRAME_NAME or resolution[0] == "m":
-            date = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
             # make sure Time is an int value instead of floating point, otherwise period and tailing 0s will be counted
             # as additional zeros making time value larger once in lean engine.
-            lean_time = int((dt - date).total_seconds() * 1000)
-            if date not in data_by_date:
-                data_by_date[date] = []
+            lean_time = int((dt.hour * 60 + dt.minute) * 60 * 1000)
         else:
-            lean_time = dt.strftime("%Y%m%d %H%M")
+            lean_time = dt.strftime("%Y%m%d %H:%M")
 
         if resolution == MT5_TICK_TIMEFRAME_NAME:
             lean_data_row = [lean_time, row[MT5_BID_COL_NAME], row[MT5_ASK_COL_NAME]]
@@ -249,19 +246,12 @@ def convert_mt5_data_to_lean_fmt(mt5_data_path, symbol, resolution, num_cur_pair
                              half_volume]
 
         if resolution == MT5_TICK_TIMEFRAME_NAME or resolution[0] == "m":
-            data_by_date[date].append(lean_data_row)
+            date = dt.strftime("%Y%m%d")
+            if date not in dates:
+                dates[date] = []
+            dates[date].append(lean_data_row)
         else:
             formatted_data.append(lean_data_row)
-
-    def create_zips(parent_dir, zip_filename, csv_name_fmt, data_rows):
-        temp_save_dir = PACKAGE_TEMP_DIR / zip_filename
-        temp_save_dir.mkdir(parents=True, exist_ok=True)
-        parent_dir.mkdir(parents=True, exist_ok=True)
-        temp_save_file = temp_save_dir / date.strftime(csv_name_fmt)
-        pd.DataFrame(data_rows).to_csv(temp_save_file, index=False, header=False)
-        zip_filepath = parent_dir / zip_filename
-        shutil.make_archive(str(zip_filepath), "zip", str(temp_save_dir))
-        shutil.rmtree(temp_save_dir)
 
     if lean_cli_dir is not None:
         save_dir = Path(lean_cli_dir) / LEAN_FOREX_DATA_DIR_PATH
@@ -278,10 +268,18 @@ def convert_mt5_data_to_lean_fmt(mt5_data_path, symbol, resolution, num_cur_pair
     else:
         save_dir = Path(LEAN_FMT_MT5_DATA_DIR)
 
+    def create_zips(parent_dir, zip_filename, csv_filename, data_rows):
+        temp_save_dir = PACKAGE_TEMP_DIR / zip_filename
+        temp_save_dir.mkdir(parents=True, exist_ok=True)
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        temp_save_file = temp_save_dir / csv_filename
+        pd.DataFrame(data_rows).to_csv(temp_save_file, index=False, header=False)
+        zip_filepath = parent_dir / zip_filename
+        shutil.make_archive(str(zip_filepath), "zip", str(temp_save_dir))
+        shutil.rmtree(temp_save_dir)
+
     if resolution == MT5_TICK_TIMEFRAME_NAME or resolution[0] == "m":
-        for date in data_by_date:
-            create_zips(save_dir, date.strftime("%Y%m%d_quote"),
-                        f"%Y%m%d_{symbol.lower()}_{resolution}_quote.csv",
-                        data_by_date[date])
+        for date in dates:
+            create_zips(save_dir, f"{date}_quote", f"{date}_{symbol.lower()}_{resolution}_quote.csv", dates[date])
     else:
         create_zips(save_dir, symbol.lower(), f"{symbol.lower()}.csv", formatted_data)

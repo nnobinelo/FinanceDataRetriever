@@ -48,3 +48,9 @@ MT5_TIMEFRAMES = {
     "w1": mt5.TIMEFRAME_W1,
     "mn1": mt5.TIMEFRAME_MN1,
 }
+
+MT5_TF_TO_DAYS_SKIPPED = {
+    "default": 365,
+    MT5_TICK_TIMEFRAME_NAME: 30,
+    "m1": 30
+}

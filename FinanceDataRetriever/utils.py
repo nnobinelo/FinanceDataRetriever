@@ -12,7 +12,8 @@ class Logger:
     @staticmethod
     def get_instance(logger_name):
         if Logger.__logger_instance is None:
-            logging.basicConfig(format=("%(filename)s: "
+            logging.basicConfig(format=("%(asctime)s: "
+                                        "%(filename)s: "
                                         "%(levelname)s: "
                                         "%(funcName)s(): "
                                         "%(lineno)d:\t"
